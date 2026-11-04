@@ -1,0 +1,48 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.butterski/rayomd-mcp",
+  "title": "RayoMD",
+  "description": "Markdown to PDF natively: no browser or TeX, the same PDF every run, files kept inside --root.",
+  "version": "0.1.0",
+  "websiteUrl": "https://github.com/Butterski/rayomd-mcp#readme",
+  "repository": {
+    "url": "https://github.com/Butterski/rayomd-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "rayomd-mcp",
+      "version": "0.1.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--root",
+          "description": "A folder the tools may read and write in (repeatable; default the working folder)",
+          "format": "filepath",
+          "isRepeated": true,
+          "isRequired": false
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "RAYOMD_PATH",
+          "description": "The rayomd binary to use instead of rayomd on PATH or the pinned release download",
+          "format": "filepath",
+          "isRequired": false
+        },
+        {
+          "name": "RAYOMD_GUI_PATH",
+          "description": "The RayoMD GUI binary for open_in_gui instead of rayomd-gui on PATH",
+          "format": "filepath",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "name": "rayomd-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for RayoMD: Markdown to PDF natively, no browser or TeX, the same PDF on every run",
+  "mcpName": "io.github.butterski/rayomd-mcp",
+  "license": "Apache-2.0",
+  "author": "Milosz Kucharski <miloszkucharski@gmail.com>",
+  "homepage": "https://github.com/Butterski/rayomd-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Butterski/rayomd-mcp.git"
+  },
+  "bugs": "https://github.com/Butterski/rayomd-mcp/issues",
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "markdown",
+    "pdf",
+    "rayomd"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "rayomd-mcp": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "resources",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test --test-concurrency=1 \"test/*.test.mjs\"",
+    "smoke": "node scripts/smoke.mjs",
+    "sync-syntax": "node scripts/sync-syntax.mjs",
+    "pin-release": "node scripts/pin-release.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
+    "@types/node": "22.20.5",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,79 @@
+name: Release
+
+# A tag vX.Y.Z publishes rayomd-mcp X.Y.Z to npm (with provenance) and its server.json to the
+# official MCP Registry. package.json and server.json must already carry X.Y.Z.
+#
+# Secrets and settings, in the "release" environment:
+# - NPM_TOKEN: an npm automation token allowed to publish rayomd-mcp (or configure npm trusted
+#   publishing for this workflow and drop the token).
+# - The MCP Registry is logged in to with GitHub OIDC (id-token: write), which owns the
+#   io.github.butterski/* namespace when this repository is Butterski/rayomd-mcp.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: npm and MCP Registry
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # npm provenance and the MCP Registry's GitHub OIDC login
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Check versions
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          package="$(node -p "require('./package.json').version")"
+          server="$(node -p "require('./server.json').version")"
+          npm_package="$(node -p "require('./server.json').packages[0].version")"
+          mcp_name="$(node -p "require('./package.json').mcpName")"
+          server_name="$(node -p "require('./server.json').name")"
+          if [ "$tag" != "$package" ] || [ "$tag" != "$server" ] || [ "$tag" != "$npm_package" ]; then
+            echo "Tag $GITHUB_REF_NAME, package.json $package, server.json $server / $npm_package must agree." >&2
+            exit 1
+          fi
+          if [ "$mcp_name" != "$server_name" ]; then
+            echo "package.json mcpName $mcp_name must equal server.json name $server_name." >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and test
+        run: npm test
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher --help >/dev/null
+
+      - name: Log in to the MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to the MCP Registry
+        run: ./mcp-publisher publish

@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Unit tests against the fake rayomd (test/fake-rayomd.mjs); the real-binary suite is
+      # skipped here and runs below on Linux.
+      - name: Build and unit tests
+        run: npm test
+
+      # The pinned release download: fetched, checked against its SHA-256 and unpacked into the
+      # cache, then found there without the network.
+      - name: Download the pinned rayomd release
+        shell: bash
+        run: |
+          binary="$(node dist/cli.js --install-binary)"
+          echo "rayomd at $binary"
+          "$binary" --version
+          test "$(node dist/cli.js --install-binary)" = "$binary"
+
+      # rayomd from source (master) for the --serve --json integration tests: PDFs byte-identical
+      # to rayomd --export and --book, recover_markdown, a killed child.
+      - name: Checkout RayoMD
+        if: runner.os == 'Linux'
+        uses: actions/checkout@v5
+        with:
+          repository: Butterski/rayomd
+          path: rayomd
+          submodules: recursive
+
+      - name: Build RayoMD
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ fonts-dejavu-core
+          cmake -S rayomd -B rayomd/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build rayomd/build --config Release --parallel
+          rayomd/build/rayomd --version
+
+      - name: Integration tests (real rayomd)
+        if: runner.os == 'Linux'
+        env:
+          RAYOMD_TEST_BINARY: rayomd/build/rayomd
+        run: node --test --test-concurrency=1 test/integration.test.mjs
+
+      - name: Smoke test over stdio (raw JSON-RPC and MCP Inspector CLI)
+        if: runner.os == 'Linux'
+        run: |
+          export RAYOMD_PATH="$PWD/rayomd/build/rayomd"
+          node scripts/smoke.mjs
+          mkdir -p "$RUNNER_TEMP/inspector" && printf '# Inspector\n' > "$RUNNER_TEMP/inspector/a.md"
+          npx -y @modelcontextprotocol/inspector@2.13.0 --cli -e RAYOMD_PATH="$RAYOMD_PATH" \
+            node dist/cli.js --root "$RUNNER_TEMP/inspector" \
+            --method tools/call --tool-name markdown_to_pdf --tool-arg path=a.md --tool-arg output=a.pdf
+          test -s "$RUNNER_TEMP/inspector/a.pdf"
+
+      - name: Package contents
+        if: runner.os == 'Linux'
+        run: npm pack --dry-run
