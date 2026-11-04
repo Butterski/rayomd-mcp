@@ -26,10 +26,9 @@ No browser. No LaTeX. No Pandoc. No Chrome to download.
 </div>
 
 > [!NOTE]
-> **Before the first release:** rayomd-mcp is not on npm yet, and it needs a RayoMD with
-> `rayomd --serve --json` (protocol 1), which comes after 5.2.5. Until both are released, build
-> RayoMD from `master` and run the server from this repository
-> ([Build from source](#quick-start)).
+> **Not on npm yet.** Until rayomd-mcp's first npm release, run it from this repository
+> ([Build from source](#quick-start)); the `npx` commands below work from then on. It needs
+> RayoMD 5.3.0 or newer (`rayomd --serve --json`), which it downloads by default.
 
 rayomd-mcp is an [MCP](https://modelcontextprotocol.io) server around
 [RayoMD](https://github.com/Butterski/rayomd), the native Markdown-to-PDF converter: agents that
@@ -151,17 +150,17 @@ npx @modelcontextprotocol/inspector --cli npx -y rayomd-mcp --root . --method to
 <details>
 <summary><b>Build from source</b></summary>
 
-Node.js 20 or newer, and a `rayomd` with `--serve --json` (build
-[RayoMD](https://github.com/Butterski/rayomd) from `master` until its next release):
+Node.js 20 or newer. The server downloads RayoMD 5.3.0 itself on the first call, or uses
+`RAYOMD_PATH` or `rayomd` on `PATH` (5.3.0 or newer):
 
 ```sh
 git clone https://github.com/Butterski/rayomd-mcp && cd rayomd-mcp
 npm ci && npm run build
-RAYOMD_PATH=/path/to/rayomd node dist/rayomd-mcp.mjs --root ~/Documents/reports
+node dist/rayomd-mcp.mjs --root ~/Documents/reports
 ```
 
-In a client's configuration: `"command": "node"`, `"args": ["/path/to/rayomd-mcp/dist/rayomd-mcp.mjs", "--root", "..."]`,
-and `"env": {"RAYOMD_PATH": "/path/to/rayomd"}`.
+In a client's configuration: `"command": "node"` and
+`"args": ["/path/to/rayomd-mcp/dist/rayomd-mcp.mjs", "--root", "..."]`.
 
 </details>
 

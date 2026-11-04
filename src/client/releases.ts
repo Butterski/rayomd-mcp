@@ -16,10 +16,14 @@ export interface ReleaseAsset {
 export type ReleaseTable = Record<string, Partial<Record<ReleasePlatform, string>>>;
 
 /** The release downloaded by default. */
-export const RAYOMD_VERSION = '5.2.5';
+export const RAYOMD_VERSION = '5.3.0';
 
 /** SHA-256 of each release archive, by version and platform (lower-case hex). */
 export const RELEASE_SHA256: ReleaseTable = {
+    '5.3.0': {
+        'linux-x64': '0a6145a30abcd64e2a0c54dd0650382566f1f07b4f9993b3123db22271e57bf0',
+        'win32-x64': '68dd4e533a57696d1ca6b42f47b440b2412af0249d3b66c54d18931007b96d2f',
+    },
     '5.2.5': {
         'linux-x64': '254ae746f656ee576ba85fc33a11643b61449d53d59ed85f20fc014418361d1d',
         'win32-x64': '1b9cef838787c5ac1cf4e8830e4d0de5d3248d14ff9972cad2058d0b3c96e4b8',
