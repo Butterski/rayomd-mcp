@@ -27,6 +27,8 @@ export {
     isServeRecord,
     MAX_REQUEST_BYTES,
     type RayomdCommand,
+    RayomdPool,
+    type RayomdPoolOptions,
     RayomdServe,
     type RayomdServeOptions,
     type ServeGreeting,

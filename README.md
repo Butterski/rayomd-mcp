@@ -166,16 +166,19 @@ CSS layout, LaTeX packages, other diagram types): the RayoMD skill's
   Only then does the tool option exist. Tool calls never pass a raw flag to rayomd: every flag
   comes from a typed, validated option.
 - **Processes.** rayomd and the GUI are started with argument arrays, never through a shell.
-  One warm `rayomd --serve --json` child serves the conversions, one request at a time; a child
-  that exits, breaks the protocol or does not answer within the timeout (60 s, `--timeout`) is
-  stopped, that call fails, and the next call starts a new child. It is ended with the server.
+  Warm `rayomd --serve --json` children serve the conversions, each one request at a time: the
+  first starts with the server (when a rayomd binary is already here), a second only when a call
+  finds the first busy, up to `--workers` (default one a CPU, at most 4); calls for one output
+  file stay on one child, in order. A child that exits, breaks the protocol or does not answer
+  within the timeout (60 s, `--timeout`) is stopped, that call fails, and the next call starts a
+  new child. They are ended with the server.
 - **Downloads.** Only the pinned release asset, only when its SHA-256 matches.
 
 ## Command line and environment
 
 ```
 rayomd-mcp [--root DIR]... [--allow-url-images] [--allow-unsafe-local-images]
-           [--allow-theme] [--allow-embed-source] [--timeout SECONDS]
+           [--allow-theme] [--allow-embed-source] [--timeout SECONDS] [--workers N]
 rayomd-mcp --install-binary | --version | --help
 ```
 
@@ -200,8 +203,32 @@ console.log(record.status, record.pages);
 await serve.close();
 ```
 
-It also exports `runRayomd` (one command, no shell), `downloadRelease`, `findOnPath`,
+It also exports `RayomdPool` (`RayomdServe` children for overlapping requests, as the server
+uses them), `runRayomd` (one command, no shell), `downloadRelease`, `findOnPath`,
 `RELEASE_SHA256` and the archive readers.
+
+## Speed
+
+Measured 2026-11-04 on four pinned cores in `node:22-alpine`, a raw JSON-RPC client on stdio,
+the mean of two runs' medians; before: the first commit, after: with RayoMD's faster request
+reader (rayomd `b71ec98`).
+
+| Call | Before | After |
+|---|---:|---:|
+| Start to `initialize` answered | 407 ms | 242 ms |
+| First `markdown_to_pdf` of tester.md, 300 ms after `initialize` | 40 ms | 25 ms |
+| Small Markdown text | 2.37 ms | 1.72 ms |
+| 1.1 MB Markdown text | 61.6 ms | 38.1 ms |
+| 7.9 MB Markdown text | 984 ms | 214 ms |
+| 1.1 MB files, 8 calls in flight | 140 calls/s | 251 calls/s |
+
+What made the difference: `dist/rayomd-mcp.mjs` is one minified bundle (one file to load
+instead of some 150 modules); the stdio transport keeps a message's chunks and joins them once
+(`src/stdio.ts`: the SDK's buffer copied everything buffered for every 64 KiB chunk and
+searched it from the start, and stopped at 10 MB); root checks are synchronous system calls
+instead of thread-pool trips; the first child starts with the server; overlapping calls run on
+several children. A small call's remaining 1.5 ms is the SDK's message handling and the pipe
+round trips; rayomd converts it in 0.1 ms.
 
 ## Development
 
@@ -209,7 +236,7 @@ It also exports `runRayomd` (one command, no shell), `downloadRelease`, `findOnP
 npm ci
 npm test                                        # build, unit tests against test/fake-rayomd.mjs
 RAYOMD_TEST_BINARY=/path/to/rayomd npm test     # and the real-binary suite (byte-identical PDFs)
-RAYOMD_PATH=/path/to/rayomd npm run smoke       # raw JSON-RPC over stdio against dist/cli.js
+RAYOMD_PATH=/path/to/rayomd npm run smoke       # raw JSON-RPC over stdio against dist/rayomd-mcp.mjs
 npm run sync-syntax -- ../rayomd/skills/rayomd/references/syntax.md
 npm run pin-release -- 5.3.0                    # pin a release's asset hashes and download it by default
 ```

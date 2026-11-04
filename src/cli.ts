@@ -6,17 +6,20 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { resolveRayomd } from './client/binary.js';
 import { Roots } from './paths.js';
 import { type Allowances, RayomdMcp, SERVER_VERSION } from './server.js';
+import { lineStdioTransport } from './stdio.js';
 
 const USAGE = `rayomd-mcp ${SERVER_VERSION}: Markdown to PDF with RayoMD, as an MCP server on stdio.
 
 Usage: rayomd-mcp [--root DIR]... [--allow-url-images] [--allow-unsafe-local-images]
-                  [--allow-theme] [--allow-embed-source] [--timeout SECONDS]
+                  [--allow-theme] [--allow-embed-source] [--timeout SECONDS] [--workers N]
        rayomd-mcp --install-binary    resolve or download rayomd and print its path
        rayomd-mcp --version | --help
 
 --root DIR       a folder tools may read and write in (repeatable; default the working folder)
 --allow-*        add the matching tool option (off by default)
 --timeout N      seconds one conversion may take (default 60)
+--workers N      rayomd processes converting at once when calls overlap (1-16; default one a
+                 CPU, at most 4; a second starts only when a call finds the first busy)
 
 Environment: RAYOMD_PATH (the rayomd binary), RAYOMD_GUI_PATH (the RayoMD GUI binary).
 `;
@@ -29,6 +32,7 @@ function fail(message: string): never {
 const roots: string[] = [];
 const allow: Allowances = {};
 let timeoutMs = 60_000;
+let workers: number | undefined;
 const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -72,6 +76,11 @@ for (let i = 0; i < argv.length; i++) {
             timeoutMs = seconds * 1000;
             break;
         }
+        case '--workers': {
+            workers = Number(value());
+            if (!Number.isInteger(workers) || workers < 1 || workers > 16) fail('--workers must be 1 to 16');
+            break;
+        }
         default:
             fail(`unknown argument ${arg}`);
     }
@@ -79,10 +88,13 @@ for (let i = 0; i < argv.length; i++) {
 
 let mcp: RayomdMcp;
 try {
-    mcp = new RayomdMcp({ roots: await Roots.create(roots), allow, requestTimeoutMs: timeoutMs });
+    mcp = new RayomdMcp({ roots: await Roots.create(roots), allow, requestTimeoutMs: timeoutMs, workers });
 } catch (error) {
     fail((error as Error).message);
 }
+// The first conversion should not wait for rayomd's start: begin it now, while the client
+// initializes and its model writes the first call.
+mcp.warm();
 
 process.on('exit', () => mcp.serve.kill());
 const handle = serveStdio(() => {
@@ -90,7 +102,7 @@ const handle = serveStdio(() => {
     // stdin closed: the client is gone; end the rayomd child so the process exits.
     server.server.onclose = () => void mcp.close();
     return server;
-});
+}, { transport: lineStdioTransport() });
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
         void handle.close().finally(() => mcp.close()).finally(() => process.exit(0));

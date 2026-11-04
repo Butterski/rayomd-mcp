@@ -1,9 +1,10 @@
 // A client of `rayomd --serve --json` (protocol 1): one warm child process, requests sent one at
 // a time and answered in order. A child that exits, writes something unexpected or does not
 // answer within the request timeout fails that request and is stopped; the next request starts a
-// new child.
+// new child. RayomdPool spreads requests that come at the same time over several such children.
 
 import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
+import { availableParallelism } from 'node:os';
 
 /** A program to run: rayomd itself, or an interpreter and a script for tests. */
 export interface RayomdCommand {
@@ -181,8 +182,19 @@ export class RayomdServe {
         return result;
     }
 
+    /**
+     * Starts the child ahead of the first request, so that request does not wait for its start.
+     * A failure is left to the next request, which starts the child again and reports it.
+     */
+    warm(): void {
+        if (this.closed) return;
+        const started = this.tail.then(() => this.start());
+        this.tail = started.catch(() => {});
+    }
+
     private async start(): Promise<Child> {
         if (this.child && !this.child.exited) return this.child;
+        if (this.closed) throw new Error('The rayomd client is closed.');
         const command = typeof this.options.command === 'function' ? await this.options.command() : this.options.command;
         const child = startChild(command, this.options.serveArgs ?? []);
         this.child = child;
@@ -259,5 +271,88 @@ export class RayomdServe {
         const timer = setTimeout(() => child.process.kill('SIGKILL'), graceMs);
         await exited.promise;
         clearTimeout(timer);
+    }
+}
+
+export interface RayomdPoolOptions extends RayomdServeOptions {
+    /** The most children running at once (default: one a CPU, at most 4). */
+    maxChildren?: number;
+}
+
+interface PoolChild {
+    serve: RayomdServe;
+    pending: number;
+}
+
+/**
+ * RayomdServe children for requests that overlap: a request goes to an idle child, else to a new
+ * one while fewer than `maxChildren` run, else to the child with the fewest waiting. Requests for
+ * one output path stay on one child, so they are written in the order they came. A child starts on
+ * the first request that finds none idle; a single caller never starts a second.
+ */
+export class RayomdPool {
+    private readonly options: RayomdServeOptions;
+    private readonly maxChildren: number;
+    private readonly children: PoolChild[] = [];
+    /** The child with requests for an output path, and how many. */
+    private readonly outputs = new Map<string, { child: PoolChild; pending: number }>();
+    private closed = false;
+
+    constructor(options: RayomdPoolOptions) {
+        this.options = options;
+        this.maxChildren = Math.max(1, options.maxChildren ?? Math.min(4, availableParallelism()));
+    }
+
+    /** The greeting of the first child, if it runs. */
+    get greeting(): ServeGreeting | undefined {
+        return this.children[0]?.serve.greeting;
+    }
+
+    /** The process id of the first child, if it runs. */
+    get pid(): number | undefined {
+        return this.children[0]?.serve.pid;
+    }
+
+    /** Starts the first child ahead of the first request (RayomdServe.warm). */
+    warm(): void {
+        if (this.closed) return;
+        if (this.children.length === 0) this.children.push({ serve: new RayomdServe(this.options), pending: 0 });
+        this.children[0]!.serve.warm();
+    }
+
+    /** As RayomdServe.request, on the child chosen for it. */
+    request(request: ServeRequest): Promise<ServeRecord> {
+        if (this.closed) return Promise.reject(new Error('The rayomd client is closed.'));
+        const owner = this.outputs.get(request.output);
+        let child = owner?.child ?? this.children.find(candidate => candidate.pending === 0);
+        if (!child && this.children.length < this.maxChildren) {
+            child = { serve: new RayomdServe(this.options), pending: 0 };
+            this.children.push(child);
+        }
+        child ??= this.children.reduce((fewest, candidate) => (candidate.pending < fewest.pending ? candidate : fewest));
+        const chosen = child;
+        chosen.pending++;
+        if (owner) owner.pending++;
+        else this.outputs.set(request.output, { child: chosen, pending: 1 });
+        const result = chosen.serve.request(request);
+        const done = () => {
+            chosen.pending--;
+            const entry = this.outputs.get(request.output);
+            if (entry && --entry.pending === 0) this.outputs.delete(request.output);
+        };
+        result.then(done, done);
+        return result;
+    }
+
+    /** Stops every child at once. */
+    kill(): void {
+        this.closed = true;
+        for (const child of this.children) child.serve.kill();
+    }
+
+    /** Ends every child's session (RayomdServe.close). */
+    async close(graceMs = 2000): Promise<void> {
+        this.closed = true;
+        await Promise.all(this.children.map(child => child.serve.close(graceMs)));
     }
 }

@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const work = mkdtempSync(path.join(tmpdir(), 'rayomd-mcp-smoke-'));
-const server = spawn(process.execPath, [path.join(root, 'dist', 'cli.js'), '--root', work], { stdio: ['pipe', 'pipe', 'inherit'] });
+const server = spawn(process.execPath, [path.join(root, 'dist', 'rayomd-mcp.mjs'), '--root', work], { stdio: ['pipe', 'pipe', 'inherit'] });
 
 let buffer = '';
 const waiting = new Map();

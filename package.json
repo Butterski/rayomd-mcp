@@ -23,7 +23,7 @@
     "node": ">=20"
   },
   "bin": {
-    "rayomd-mcp": "dist/cli.js"
+    "rayomd-mcp": "dist/rayomd-mcp.mjs"
   },
   "exports": {
     ".": {
@@ -43,7 +43,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/bundle.mjs",
     "test": "npm run build && node --test --test-concurrency=1 \"test/*.test.mjs\"",
     "smoke": "node scripts/smoke.mjs",
     "sync-syntax": "node scripts/sync-syntax.mjs",
@@ -57,6 +57,7 @@
   "devDependencies": {
     "@modelcontextprotocol/client": "2.4.0",
     "@types/node": "22.20.5",
+    "esbuild": "0.25.10",
     "typescript": "7.0.2"
   }
 }

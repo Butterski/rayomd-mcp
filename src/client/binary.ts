@@ -40,6 +40,8 @@ export interface ResolveOptions {
     platform?: ReleasePlatform;
     /** Skip RAYOMD_PATH and PATH and use only the cache or a download. */
     downloadOnly?: boolean;
+    /** Only a binary already here (RAYOMD_PATH, PATH, the cache): throw instead of downloading. */
+    offline?: boolean;
     /** fetch implementation (default the global one). */
     fetch?: typeof fetch;
     /** Progress messages, such as "Downloading ..." (default none). */
@@ -147,5 +149,6 @@ export async function resolveRayomd(options: ResolveOptions = {}): Promise<Rayom
         const cached = cachedBinaryPath(options.cacheDir ?? defaultCacheDir(env), version, platform);
         if (isExecutableFile(cached)) return { path: cached, source: 'cache' };
     }
+    if (options.offline) throw new Error(`rayomd ${version} is not installed (RAYOMD_PATH, PATH or ${options.cacheDir ?? defaultCacheDir(env)}).`);
     return { path: await downloadRelease({ ...options, env }), source: 'download' };
 }

@@ -2,7 +2,8 @@
 // A stand-in for rayomd in the unit tests: `--serve --json` protocol 1, `--book`,
 // `--recover-source` and `--version`. Its "PDF" is text: "%FAKEPDF", the flags as JSON and the
 // Markdown, so tests can see what the server asked for. Markdown containing CRASH makes the serve
-// child exit mid-request, HANG makes it never answer, GARBAGE makes it answer with a non-JSON line.
+// child exit mid-request, HANG makes it never answer, GARBAGE makes it answer with a non-JSON line,
+// SLOW makes it take 200 ms, blocking as a conversion does.
 // FAKE_RAYOMD_OLD=1 behaves as a rayomd without --serve --json (no greeting, waits for paths).
 
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -68,6 +69,7 @@ if (process.env.FAKE_RAYOMD_OLD === '1') {
             process.exit(3);
         }
         if (markdown.includes('HANG')) return;
+        if (markdown.includes('SLOW')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
         if (markdown.includes('GARBAGE')) {
             process.stdout.write('this is not JSON\n');
             return;

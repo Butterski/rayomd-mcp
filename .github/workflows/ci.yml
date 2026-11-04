@@ -41,10 +41,10 @@ jobs:
       - name: Download the pinned rayomd release
         shell: bash
         run: |
-          binary="$(node dist/cli.js --install-binary)"
+          binary="$(node dist/rayomd-mcp.mjs --install-binary)"
           echo "rayomd at $binary"
           "$binary" --version
-          test "$(node dist/cli.js --install-binary)" = "$binary"
+          test "$(node dist/rayomd-mcp.mjs --install-binary)" = "$binary"
 
       # rayomd from source (master) for the --serve --json integration tests: PDFs byte-identical
       # to rayomd --export and --book, recover_markdown, a killed child.
@@ -78,7 +78,7 @@ jobs:
           node scripts/smoke.mjs
           mkdir -p "$RUNNER_TEMP/inspector" && printf '# Inspector\n' > "$RUNNER_TEMP/inspector/a.md"
           npx -y @modelcontextprotocol/inspector@2.13.0 --cli -e RAYOMD_PATH="$RAYOMD_PATH" \
-            node dist/cli.js --root "$RUNNER_TEMP/inspector" \
+            node dist/rayomd-mcp.mjs --root "$RUNNER_TEMP/inspector" \
             --method tools/call --tool-name markdown_to_pdf --tool-arg path=a.md --tool-arg output=a.pdf
           test -s "$RUNNER_TEMP/inspector/a.pdf"
 

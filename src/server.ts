@@ -14,7 +14,7 @@ import * as z from 'zod/v4';
 import { resolveRayomd } from './client/binary.js';
 import { exportArgs, type ExportOptions } from './client/options.js';
 import { runRayomd } from './client/run.js';
-import { type RayomdCommand, RayomdServe, type ServeRecord } from './client/serve.js';
+import { type RayomdCommand, RayomdPool, type ServeRecord } from './client/serve.js';
 import { openInGui } from './gui.js';
 import type { Roots } from './paths.js';
 import { SYNTAX_SHORT, SYNTAX_URI, syntaxReference } from './syntax.js';
@@ -41,6 +41,8 @@ export interface RayomdMcpConfig {
     rayomd?: RayomdCommand | (() => Promise<RayomdCommand>);
     /** Per-request timeout in milliseconds (default 60000). */
     requestTimeoutMs?: number;
+    /** The most rayomd children converting at once (default: one a CPU, at most 4). */
+    workers?: number;
     /** Environment for RAYOMD_GUI_PATH, PATH and the display (default process.env). */
     env?: NodeJS.ProcessEnv;
     /** Diagnostics (default stderr). */
@@ -158,10 +160,10 @@ export function pdfPageCount(pdf: Buffer): number {
     return pages;
 }
 
-/** One rayomd-mcp server process: the roots, the warm serve child and the MCP server factory. */
+/** One rayomd-mcp server process: the roots, the warm serve children and the MCP server factory. */
 export class RayomdMcp {
     readonly roots: Roots;
-    readonly serve: RayomdServe;
+    readonly serve: RayomdPool;
     private readonly config: RayomdMcpConfig;
     private readonly allow: Allowances;
     private command?: Promise<RayomdCommand>;
@@ -170,7 +172,7 @@ export class RayomdMcp {
         this.config = config;
         this.roots = config.roots;
         this.allow = config.allow ?? {};
-        this.serve = new RayomdServe({ command: () => this.rayomd(), requestTimeoutMs: config.requestTimeoutMs });
+        this.serve = new RayomdPool({ command: () => this.rayomd(), requestTimeoutMs: config.requestTimeoutMs, maxChildren: config.workers });
     }
 
     private log(message: string): void {
@@ -187,6 +189,22 @@ export class RayomdMcp {
             this.command = undefined;
         });
         return this.command;
+    }
+
+    /**
+     * Starts the first rayomd child before the first call (2026-11-04: the first tester.md call
+     * took 34.6 ms, the second 4.9). Only with a binary already here: a download waits for the
+     * first call, which reports its progress and its failure.
+     */
+    warm(): void {
+        if (this.config.rayomd !== undefined || this.command !== undefined) {
+            this.serve.warm();
+            return;
+        }
+        resolveRayomd({ env: this.config.env, offline: true }).then(binary => {
+            this.command ??= Promise.resolve({ command: binary.path });
+            this.serve.warm();
+        }, () => {});
     }
 
     /** The export flags of a tool call's options, the theme path checked against the roots. */
@@ -255,7 +273,11 @@ export class RayomdMcp {
                     if (input !== undefined) {
                         request = { input: await this.roots.existing(input, 'path'), output: target, args: flags };
                     } else {
-                        const source = await this.roots.output(sourcePath ?? target.replace(/\.pdf$/, '.md'), 'source_path', '.md');
+                        // The default source is the output's name with .md, in the folder just checked;
+                        // rayomd only resolves images from it and never opens it.
+                        const source = sourcePath === undefined
+                            ? target.replace(/\.pdf$/, '.md')
+                            : await this.roots.output(sourcePath, 'source_path', '.md');
                         request = { markdown: markdown!, source_path: source, output: target, args: flags };
                     }
                 } catch (error) {
@@ -416,7 +438,7 @@ export class RayomdMcp {
         );
     }
 
-    /** Ends the rayomd child. */
+    /** Ends the rayomd children. */
     close(): Promise<void> {
         return this.serve.close();
     }

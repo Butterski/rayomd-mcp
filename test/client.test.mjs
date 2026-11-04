@@ -14,6 +14,7 @@ import {
     exportArgs,
     extractMember,
     findOnPath,
+    RayomdPool,
     RayomdServe,
     releaseAsset,
     resolveRayomd,
@@ -100,6 +101,74 @@ describe('RayomdServe', () => {
         const serve = new RayomdServe({ command: fakeCommand });
         await assert.rejects(serve.request({ markdown: 'x'.repeat(32 * 1024 * 1024), output: path.join(dir, 'big.pdf') }), /larger than/);
         await serve.close();
+    });
+});
+
+describe('RayomdPool', () => {
+    let dir;
+    before(() => {
+        dir = tempDir();
+    });
+    after(() => removeDir(dir));
+
+    const slow = (pool, name) => pool.request({ markdown: `SLOW ${name}`, output: path.join(dir, `${name}.pdf`) });
+
+    test('overlapping requests run on several children, one child for one caller', async () => {
+        const pool = new RayomdPool({ command: fakeCommand, maxChildren: 4 });
+        try {
+            assert.equal((await slow(pool, 'warm')).status, 'ok');
+            const first = pool.pid;
+            // Four conversions of 200 ms each at once: about 200 ms on four children, 800 on one.
+            const start = Date.now();
+            const answers = await Promise.all(['a', 'b', 'c', 'd'].map(name => slow(pool, name)));
+            assert.ok(answers.every(answer => answer.status === 'ok'));
+            assert.ok(Date.now() - start < 700, `took ${Date.now() - start} ms`);
+            assert.equal(pool.pid, first);
+        } finally {
+            await pool.close();
+        }
+        await assert.rejects(slow(pool, 'closed'), /closed/);
+    });
+
+    test('requests for one output path stay in order on one child', async () => {
+        const pool = new RayomdPool({ command: fakeCommand, maxChildren: 4 });
+        try {
+            const output = path.join(dir, 'same.pdf');
+            const finished = [];
+            await Promise.all([
+                pool.request({ markdown: 'SLOW first', output }).then(() => finished.push('first')),
+                pool.request({ markdown: 'second', output }).then(() => finished.push('second')),
+            ]);
+            assert.deepEqual(finished, ['first', 'second']);
+            assert.match(readFileSync(output, 'utf8'), /second$/);
+        } finally {
+            await pool.close();
+        }
+    });
+
+    test('maxChildren 1 keeps every request on one child', async () => {
+        const pool = new RayomdPool({ command: fakeCommand, maxChildren: 1 });
+        try {
+            const start = Date.now();
+            await Promise.all(['e', 'f', 'g'].map(name => slow(pool, name)));
+            assert.ok(Date.now() - start >= 590, `took ${Date.now() - start} ms`);
+        } finally {
+            await pool.close();
+        }
+    });
+
+    test('warm starts the first child before the first request, which then uses it', async () => {
+        const pool = new RayomdPool({ command: fakeCommand });
+        try {
+            pool.warm();
+            for (let waited = 0; pool.greeting === undefined && waited < 5000; waited += 20) await new Promise(resolve => setTimeout(resolve, 20));
+            const pid = pool.pid;
+            assert.ok(pid !== undefined);
+            assert.equal((await pool.request({ markdown: 'x', output: path.join(dir, 'w.pdf') })).status, 'ok');
+            assert.equal(pool.pid, pid);
+        } finally {
+            await pool.close();
+        }
     });
 });
 
@@ -235,6 +304,15 @@ describe('resolveRayomd', () => {
             const before = requests;
             const second = await resolveRayomd({ ...options, baseUrl: 'http://127.0.0.1:9' });
             assert.deepEqual(second, { path: first.path, source: 'cache' });
+            assert.equal(requests, before);
+        });
+
+        test(`offline finds the cached ${platform} binary and downloads nothing without it`, async () => {
+            const cacheDir = path.join(dir, `cache-${platform}`);
+            const before = requests;
+            const options = { env: empty, version: '9.9.9', baseUrl, platform, offline: true };
+            assert.equal((await resolveRayomd({ ...options, cacheDir })).source, 'cache');
+            await assert.rejects(resolveRayomd({ ...options, cacheDir: path.join(dir, 'cache-none') }), /is not installed/);
             assert.equal(requests, before);
         });
     }
