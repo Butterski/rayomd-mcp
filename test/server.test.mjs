@@ -1,7 +1,8 @@
 // The MCP server through the SDK's client, in memory, against the fake rayomd.
 
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { after, before, describe, test } from 'node:test';
@@ -26,6 +27,25 @@ describe('rayomd-mcp server (fake rayomd)', () => {
         writeFileSync(path.join(other, 'secret.md'), '# secret');
     });
     after(() => removeDir(base));
+
+    test('warm starts rayomd and converts once in a temporary folder it removes', async () => {
+        const warmDirs = () => readdirSync(tmpdir()).filter(name => name.startsWith('rayomd-mcp-warm-'));
+        const before = warmDirs();
+        const files = readdirSync(root).sort();
+        const session = await connect({ roots: [root] });
+        try {
+            await session.mcp.warm();
+            assert.deepEqual(session.mcp.serve.greeting, { rayomd: '0.0.0-fake', protocol: 1 });
+            assert.deepEqual(readdirSync(root).sort(), files);
+            assert.deepEqual(warmDirs(), before);
+            const pid = session.mcp.serve.pid;
+            const result = await session.client.callTool({ name: 'markdown_to_pdf', arguments: { markdown: '# x', output: 'warm-after.pdf' } });
+            assert.equal(result.isError, undefined);
+            assert.equal(session.mcp.serve.pid, pid);
+        } finally {
+            await session.close();
+        }
+    });
 
     for (const era of ['legacy', 'modern']) {
         test(`lists the tools with schemas, annotations and the syntax resource (${era} era)`, async () => {

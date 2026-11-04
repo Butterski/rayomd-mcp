@@ -226,7 +226,8 @@ export class RayomdServe {
         if (this.closed) throw new Error('The rayomd client is closed.');
         const id = this.nextId++;
         const line = JSON.stringify({ id, ...request });
-        if (Buffer.byteLength(line, 'utf8') > MAX_REQUEST_BYTES) {
+        // A UTF-16 code unit is at most 3 UTF-8 bytes: only a line that long can be over the limit.
+        if (line.length * 3 > MAX_REQUEST_BYTES && Buffer.byteLength(line, 'utf8') > MAX_REQUEST_BYTES) {
             throw new Error(`The request is larger than rayomd's limit of ${MAX_REQUEST_BYTES} bytes.`);
         }
         const child = await this.start();

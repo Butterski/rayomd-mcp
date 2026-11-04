@@ -92,17 +92,19 @@ try {
 } catch (error) {
     fail((error as Error).message);
 }
-// The first conversion should not wait for rayomd's start: begin it now, while the client
-// initializes and its model writes the first call.
-mcp.warm();
 
 process.on('exit', () => mcp.serve.kill());
 const handle = serveStdio(() => {
     const server = mcp.createServer();
     // stdin closed: the client is gone; end the rayomd child so the process exits.
     server.server.onclose = () => void mcp.close();
+    // The first conversion should not wait for rayomd's start or the first run of a call's code:
+    // get both ready once the client has initialized, while its model writes the first call.
+    server.server.oninitialized = () => void mcp.warm();
     return server;
 }, { transport: lineStdioTransport() });
+// A 2026-07-28 client sends no notifications/initialized.
+setTimeout(() => void mcp.warm(), 1000).unref();
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
         void handle.close().finally(() => mcp.close()).finally(() => process.exit(0));

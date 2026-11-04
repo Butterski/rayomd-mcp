@@ -16,8 +16,9 @@ import { exportArgs, type ExportOptions } from './client/options.js';
 import { runRayomd } from './client/run.js';
 import { type RayomdCommand, RayomdPool, type ServeRecord } from './client/serve.js';
 import { openInGui } from './gui.js';
-import type { Roots } from './paths.js';
+import { Roots } from './paths.js';
 import { SYNTAX_SHORT, SYNTAX_URI, syntaxReference } from './syntax.js';
+import { callInMemory } from './warm.js';
 
 export const SERVER_NAME = 'rayomd-mcp';
 const packageJson: unknown = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
@@ -119,6 +120,34 @@ function optionsShape(allow: Allowances, book: boolean) {
     };
 }
 
+function markdownInputSchema(allow: Allowances) {
+    return z.object({
+        markdown: z.string().optional().describe('The Markdown text (give this or path)'),
+        path: z.string().optional().describe('A Markdown file to convert (give this or markdown)'),
+        output: z.string().describe('The PDF to write, ending in .pdf; an existing file is replaced'),
+        source_path: z.string().optional()
+            .describe('With markdown: the .md file the text stands for; relative images resolve from its folder. Default: output with .md'),
+        ...optionsShape(allow, false),
+    });
+}
+type MarkdownInputSchema = ReturnType<typeof markdownInputSchema>;
+
+/**
+ * markdown_to_pdf's input schema, one for each set of allowances in the process: zod compiles a
+ * schema's parser on its first use, and the warm-up call (RayomdMcp.warm) and the client's
+ * servers then use the same one.
+ */
+const markdownInputSchemas = new Map<string, MarkdownInputSchema>();
+function sharedMarkdownInputSchema(allow: Allowances): MarkdownInputSchema {
+    const key = [allow.urlImages, allow.unsafeLocalImages, allow.theme, allow.embedSource].map(Boolean).join();
+    let schema = markdownInputSchemas.get(key);
+    if (!schema) markdownInputSchemas.set(key, (schema = markdownInputSchema(allow)));
+    return schema;
+}
+
+/** The warm-up call's Markdown: Unicode text and a formula, so the fonts they need are loaded. */
+const WARM_MARKDOWN = '# Warm\n\nZa\u017c\u00f3\u0142\u0107 g\u0119\u015bl\u0105 *ja\u017a\u0144* and $x^2 + \\frac{1}{2}$.\n';
+
 type ToolResult = {
     content: Array<
         | { type: 'text'; text: string }
@@ -167,12 +196,14 @@ export class RayomdMcp {
     private readonly config: RayomdMcpConfig;
     private readonly allow: Allowances;
     private command?: Promise<RayomdCommand>;
+    private warmed?: Promise<void>;
 
-    constructor(config: RayomdMcpConfig) {
+    /** `serve`: the children of another instance (the warm-up's server shares them). */
+    constructor(config: RayomdMcpConfig, serve?: RayomdPool) {
         this.config = config;
         this.roots = config.roots;
         this.allow = config.allow ?? {};
-        this.serve = new RayomdPool({ command: () => this.rayomd(), requestTimeoutMs: config.requestTimeoutMs, maxChildren: config.workers });
+        this.serve = serve ?? new RayomdPool({ command: () => this.rayomd(), requestTimeoutMs: config.requestTimeoutMs, maxChildren: config.workers });
     }
 
     private log(message: string): void {
@@ -192,19 +223,35 @@ export class RayomdMcp {
     }
 
     /**
-     * Starts the first rayomd child before the first call (2026-11-04: the first tester.md call
-     * took 34.6 ms, the second 4.9). Only with a binary already here: a download waits for the
-     * first call, which reports its progress and its failure.
+     * Gets the first call ready: starts the first rayomd child and makes one markdown_to_pdf call
+     * through a server of its own into a temporary folder (deleted after), so the SDK's and zod's
+     * code for a call and rayomd's fonts are ready (2026-11-04: the first tester.md call took
+     * 34.6 ms with neither, the second 4.9). Once; only with a binary already here: a download
+     * waits for the first call, which reports its progress and its failure.
      */
-    warm(): void {
-        if (this.config.rayomd !== undefined || this.command !== undefined) {
+    warm(): Promise<void> {
+        if (this.warmed) return this.warmed;
+        const start = () => {
             this.serve.warm();
-            return;
+            return this.warmCall().catch(() => {});
+        };
+        this.warmed = this.config.rayomd !== undefined || this.command !== undefined
+            ? start()
+            : resolveRayomd({ env: this.config.env, offline: true }).then(binary => {
+                this.command ??= Promise.resolve({ command: binary.path });
+                return start();
+            }, () => {});
+        return this.warmed;
+    }
+
+    private async warmCall(): Promise<void> {
+        const dir = await mkdtemp(path.join(tmpdir(), 'rayomd-mcp-warm-'));
+        try {
+            const twin = new RayomdMcp({ ...this.config, roots: await Roots.create([dir]) }, this.serve);
+            await callInMemory(twin.createServer(), 'markdown_to_pdf', { markdown: WARM_MARKDOWN, output: 'warm.pdf' });
+        } finally {
+            await rm(dir, { recursive: true, force: true });
         }
-        resolveRayomd({ env: this.config.env, offline: true }).then(binary => {
-            this.command ??= Promise.resolve({ command: binary.path });
-            this.serve.warm();
-        }, () => {});
     }
 
     /** The export flags of a tool call's options, the theme path checked against the roots. */
@@ -245,14 +292,7 @@ export class RayomdMcp {
     }
 
     private registerMarkdownToPdf(server: McpServer): void {
-        const inputSchema = z.object({
-            markdown: z.string().optional().describe('The Markdown text (give this or path)'),
-            path: z.string().optional().describe('A Markdown file to convert (give this or markdown)'),
-            output: z.string().describe('The PDF to write, ending in .pdf; an existing file is replaced'),
-            source_path: z.string().optional()
-                .describe('With markdown: the .md file the text stands for; relative images resolve from its folder. Default: output with .md'),
-            ...optionsShape(this.allow, false),
-        });
+        const inputSchema = sharedMarkdownInputSchema(this.allow);
         server.registerTool(
             'markdown_to_pdf',
             {
