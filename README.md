@@ -272,12 +272,17 @@ renders instead of finding out from the PDF.
   then does the tool option exist. Tool calls never pass a raw flag to rayomd: every flag comes
   from a typed, validated option.
 - **Processes.** rayomd and the GUI are started with argument arrays, never through a shell. Warm
-  `rayomd --serve --json` children serve the conversions, each one request at a time: the first
-  starts once the client has initialized (when a rayomd binary is already here), a second only
-  when a call finds the first busy, up to `--workers` (default one a CPU, at most 4); calls for one
-  output file stay on one child, in order. A child that exits, breaks the protocol or does not
-  answer within the timeout (60 s, `--timeout`) is stopped, that call fails, and the next call
-  starts a new child. They end with the server.
+  `rayomd --serve --json` children serve the conversions from one queue, in order: a call goes to
+  the first child that is free and has greeted, never to one still starting. The first child
+  starts once the client has initialized (when a rayomd binary is already here); another starts,
+  one at a time, only when calls have waited 5 ms for busy children without a break, up to
+  `--workers` (default one a CPU, at most 4), and ends after 30 s idle. Calls for one output file
+  run one after the other, in their order. `book_to_pdf` and `recover_markdown` take a slot of
+  the same budget, so at most `--workers` rayomd processes work at once. A call the client cancels
+  while it waits never reaches rayomd; a one-shot command it cancels is stopped. A child that
+  exits, breaks the protocol or does not answer within the timeout (60 s, `--timeout`) is
+  stopped and dropped, that call fails, and the calls behind it go to the other children. They end
+  with the server.
 - **Downloads.** Only the pinned release asset, only when its SHA-256 matches.
 
 ## Performance
@@ -313,7 +318,21 @@ the round trips through the pipes. What made the difference:
   keeps a message's chunks and joins them once, up to rayomd's 32 MiB request line.
 - **System calls instead of thread-pool trips** for the root checks, and no second check of a
   `source_path` that is the output's.
-- **Several children** when calls overlap; one when they do not.
+- **Children managed from one queue.** A burst of calls is cleared by the warm child instead of
+  waiting for new processes (each `spawn` holds Node.js's event loop about 0.75 ms), and a call no
+  longer waits behind a slow build while another child is free:
+
+  | `rayomd-mcp/client`'s pool, real `rayomd` | One queue per child | One queue |
+  |---|---:|---:|
+  | 8 small calls at once, one warm child: p50 / p99 | 3.2 / 8.5 ms | **0.6 / 2.9 ms** |
+  | Small calls behind a 7.9 MB build, at most 2 children: p99 | 31 ms | **7.5 ms** |
+  | Small calls, 8 in flight | 17,000 calls/s | 16,000 calls/s |
+  | tester.md, 8 in flight | 5,100 calls/s | 5,000 calls/s |
+
+  With calls 1 ms apart behind a 7.9 MB build and up to four children, p99 went from 1.6 to 9.8
+  ms: the old pool had started four children for the earlier bursts, the new one starts the second
+  only when calls wait. Through MCP the calls run at 3,100 to 3,600 a second either way: there the
+  SDK, not the pool, sets the pace.
 - **In rayomd:** the request reader of `--serve --json` reads strings 16 bytes a step (SSE2) and
   decodes escapes in blocks: a 1 MB request of Markdown parses in 0.3 ms instead of 2.75.
 
@@ -350,8 +369,12 @@ console.log(record.status, record.pages);
 await rayomd.close();
 ```
 
+`request(…, { signal })` drops a call that still waits when the signal aborts, and
+`run(signal => …, { signal })` runs a one-shot command in a slot of the same budget; the pool's
+options are `maxChildren`, `idleMs`, `startAfterMs`, `requestTimeoutMs` and `startTimeoutMs`.
 `RayomdServe` is one child on its own; the module also exports `runRayomd` (one command, no
-shell), `downloadRelease`, `findOnPath`, `RELEASE_SHA256` and the archive readers.
+shell, stopped by a signal), `downloadRelease`, `findOnPath`, `RELEASE_SHA256` and the archive
+readers.
 
 ## Development
 

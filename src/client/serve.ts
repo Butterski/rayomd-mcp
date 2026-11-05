@@ -183,13 +183,19 @@ export class RayomdServe {
     }
 
     /**
-     * Starts the child ahead of the first request, so that request does not wait for its start.
-     * A failure is left to the next request, which starts the child again and reports it.
+     * Starts the child ahead of the first request and resolves once it has greeted, or rejects
+     * with why it could not start; a later request starts it again.
      */
-    warm(): void {
-        if (this.closed) return;
+    ready(): Promise<void> {
+        if (this.closed) return Promise.reject(new Error('The rayomd client is closed.'));
         const started = this.tail.then(() => this.start());
         this.tail = started.catch(() => {});
+        return started.then(() => {});
+    }
+
+    /** ready() without waiting for it: a failure is left to the next request, which reports it. */
+    warm(): void {
+        this.ready().catch(() => {});
     }
 
     private async start(): Promise<Child> {
@@ -276,84 +282,306 @@ export class RayomdServe {
 }
 
 export interface RayomdPoolOptions extends RayomdServeOptions {
-    /** The most children running at once (default: one a CPU, at most 4). */
+    /** The most rayomd processes working at once (default: one a CPU, at most 4). */
     maxChildren?: number;
+    /** Milliseconds a child beyond the first may stay idle before it is ended (default 30000). */
+    idleMs?: number;
+    /**
+     * Milliseconds calls may wait for busy children, without a break, before another child starts
+     * (default 5): starting one holds Node's event loop about 0.75 ms (spawn), and a warm child
+     * clears a burst of small calls sooner than that.
+     */
+    startAfterMs?: number;
 }
 
-interface PoolChild {
-    serve: RayomdServe;
-    pending: number;
+export interface PoolCallOptions {
+    /** Cancels the call while it waits for a child; one already sent runs to its end. */
+    signal?: AbortSignal;
 }
+
+interface Worker {
+    serve: RayomdServe;
+    ready: boolean;
+    busy: boolean;
+    idleSince: number;
+}
+
+type Job = {
+    resolve: (value: never) => void;
+    reject: (error: Error) => void;
+    signal?: AbortSignal;
+    onAbort?: () => void;
+    queuedAt: number;
+} & (
+    | { kind: 'serve'; request: ServeRequest }
+    | { kind: 'run'; run: (signal?: AbortSignal) => Promise<unknown> }
+);
+
+/** After a child failed to start, the next start waits this long if another child serves. */
+const START_RETRY_MS = 1000;
 
 /**
- * RayomdServe children for requests that overlap: a request goes to an idle child, else to a new
- * one while fewer than `maxChildren` run, else to the child with the fewest waiting. Requests for
- * one output path stay on one child, so they are written in the order they came. A child starts on
- * the first request that finds none idle; a single caller never starts a second.
+ * Warm `rayomd --serve --json` children and one queue of calls, in their order:
+ *
+ * - A call goes to the first idle child that has greeted. None idle: it waits in the queue. When
+ *   calls have waited `startAfterMs` without a break, one more child starts (up to
+ *   `maxChildren`, one at a time): a burst of small calls is cleared by the warm child without new
+ *   processes, a steady load gets its children, and a waiting call goes to whichever child is
+ *   free first, never to one still starting.
+ * - Calls for one output path run one after the other, in their order.
+ * - `run` takes a slot for a one-shot rayomd command (--book, --recover-source): with the busy
+ *   children, at most `maxChildren` rayomd processes work at once.
+ * - A child that died or broke the protocol is dropped after its call; a call that waits is
+ *   cancelled through its signal. Children beyond the first end after `idleMs` idle.
  */
 export class RayomdPool {
     private readonly options: RayomdServeOptions;
     private readonly maxChildren: number;
-    private readonly children: PoolChild[] = [];
-    /** The child with requests for an output path, and how many. */
-    private readonly outputs = new Map<string, { child: PoolChild; pending: number }>();
+    private readonly idleMs: number;
+    private readonly startAfterMs: number;
+    private startTimer?: NodeJS.Timeout;
+    private backlogSince?: number;
+    private reaper?: NodeJS.Timeout;
+    private busy = 0;
+    private readonly workers: Worker[] = [];
+    private readonly queue: Job[] = [];
+    private readonly busyOutputs = new Set<string>();
+    private running = 0;
+    private startBlockedUntil = 0;
     private closed = false;
 
     constructor(options: RayomdPoolOptions) {
         this.options = options;
         this.maxChildren = Math.max(1, options.maxChildren ?? Math.min(4, availableParallelism()));
+        this.idleMs = options.idleMs ?? 30_000;
+        this.startAfterMs = options.startAfterMs ?? 5;
     }
 
-    /** The greeting of the first child, if it runs. */
+    /** The greeting of the first child that has greeted. */
     get greeting(): ServeGreeting | undefined {
-        return this.children[0]?.serve.greeting;
+        return this.workers.find(worker => worker.ready)?.serve.greeting;
     }
 
-    /** The process id of the first child, if it runs. */
+    /** The process id of the first running child. */
     get pid(): number | undefined {
-        return this.children[0]?.serve.pid;
+        for (const worker of this.workers) if (worker.serve.pid !== undefined) return worker.serve.pid;
+        return undefined;
     }
 
-    /** Starts the first child ahead of the first request (RayomdServe.warm). */
+    /** The children running or starting. */
+    get children(): number {
+        return this.workers.length;
+    }
+
+    /** Starts the first child ahead of the first call. */
     warm(): void {
-        if (this.closed) return;
-        if (this.children.length === 0) this.children.push({ serve: new RayomdServe(this.options), pending: 0 });
-        this.children[0]!.serve.warm();
+        if (!this.closed && this.workers.length === 0) this.spawn();
     }
 
-    /** As RayomdServe.request, on the child chosen for it. */
-    request(request: ServeRequest): Promise<ServeRecord> {
+    /** As RayomdServe.request, on the first child free for it. */
+    request(request: ServeRequest, options: PoolCallOptions = {}): Promise<ServeRecord> {
+        return this.enqueue<ServeRecord>({ kind: 'serve', request }, options.signal);
+    }
+
+    /**
+     * Runs `run` (a one-shot rayomd command) when a slot is free; `signal` is the call's, aborted
+     * when it is cancelled while running too.
+     */
+    run<T>(run: (signal?: AbortSignal) => Promise<T>, options: PoolCallOptions = {}): Promise<T> {
+        return this.enqueue<T>({ kind: 'run', run }, options.signal);
+    }
+
+    private enqueue<T>(work: { kind: 'serve'; request: ServeRequest } | { kind: 'run'; run: (signal?: AbortSignal) => Promise<unknown> },
+        signal: AbortSignal | undefined): Promise<T> {
         if (this.closed) return Promise.reject(new Error('The rayomd client is closed.'));
-        const owner = this.outputs.get(request.output);
-        let child = owner?.child ?? this.children.find(candidate => candidate.pending === 0);
-        if (!child && this.children.length < this.maxChildren) {
-            child = { serve: new RayomdServe(this.options), pending: 0 };
-            this.children.push(child);
+        if (signal?.aborted) return Promise.reject(new Error('The call was cancelled.'));
+        const { promise, resolve, reject } = Promise.withResolvers<T>();
+        const job = { ...work, resolve, reject, signal, queuedAt: performance.now() } as Job;
+        if (signal) {
+            job.onAbort = () => {
+                const at = this.queue.indexOf(job);
+                if (at < 0) return;
+                this.queue.splice(at, 1);
+                job.reject(new Error('The call was cancelled.'));
+            };
+            signal.addEventListener('abort', job.onAbort, { once: true });
         }
-        child ??= this.children.reduce((fewest, candidate) => (candidate.pending < fewest.pending ? candidate : fewest));
-        const chosen = child;
-        chosen.pending++;
-        if (owner) owner.pending++;
-        else this.outputs.set(request.output, { child: chosen, pending: 1 });
-        const result = chosen.serve.request(request);
-        const done = () => {
-            chosen.pending--;
-            const entry = this.outputs.get(request.output);
-            if (entry && --entry.pending === 0) this.outputs.delete(request.output);
+        this.queue.push(job);
+        this.pump();
+        return promise;
+    }
+
+    private get active(): number {
+        return this.running + this.busy;
+    }
+
+    /** Hands out what can start now, then starts a child when a call has waited long enough. */
+    private pump(): void {
+        if (this.closed) return;
+        let active = this.active;
+        let oldestWaiting = Infinity;
+        for (let at = 0; at < this.queue.length && active < this.maxChildren;) {
+            const job = this.queue[at]!;
+            if (job.kind === 'run') {
+                this.queue.splice(at, 1);
+                this.startRun(job);
+                active++;
+                continue;
+            }
+            if (this.busyOutputs.has(job.request.output)) {
+                at++;
+                continue;
+            }
+            const worker = this.workers.find(candidate => candidate.ready && !candidate.busy);
+            if (!worker) {
+                oldestWaiting = Math.min(oldestWaiting, job.queuedAt);
+                at++;
+                continue;
+            }
+            this.queue.splice(at, 1);
+            this.dispatch(worker, job);
+            active++;
+        }
+        // How long calls have waited for a child without a break: a burst the warm children clear
+        // does not count, a busy stretch does, however short each call is.
+        if (oldestWaiting === Infinity) {
+            this.backlogSince = undefined;
+            return;
+        }
+        this.backlogSince ??= oldestWaiting;
+        if (this.workers.length >= this.maxChildren) return;
+        // One child starting at a time.
+        if (this.workers.some(worker => !worker.ready)) return;
+        // No child at all: start one now. Else once calls have waited startAfterMs without a
+        // break, and not within START_RETRY_MS of a child that failed to start.
+        const due = this.workers.length === 0 ? 0 : Math.max(this.backlogSince + this.startAfterMs, this.startBlockedUntil);
+        const wait = due - performance.now();
+        if (wait <= 0) {
+            this.spawn();
+        } else if (!this.startTimer) {
+            this.startTimer = setTimeout(() => {
+                this.startTimer = undefined;
+                this.pump();
+            }, Math.ceil(wait));
+            this.startTimer.unref();
+        }
+    }
+
+    private detach(job: Job): void {
+        if (job.onAbort) job.signal?.removeEventListener('abort', job.onAbort);
+    }
+
+    private dispatch(worker: Worker, job: Job & { kind: 'serve' }): void {
+        this.detach(job);
+        worker.busy = true;
+        this.busy++;
+        const output = job.request.output;
+        this.busyOutputs.add(output);
+        const settle = () => {
+            worker.busy = false;
+            this.busy--;
+            this.busyOutputs.delete(output);
+            // A child that died, timed out or broke the protocol was stopped: drop it, and let a
+            // new one start when calls wait.
+            if (worker.serve.pid === undefined) this.remove(worker);
+            else this.idle(worker);
+            this.pump();
         };
-        result.then(done, done);
-        return result;
+        worker.serve.request(job.request).then(record => {
+            settle();
+            (job.resolve as (record: ServeRecord) => void)(record);
+        }, (error: Error) => {
+            settle();
+            job.reject(error);
+        });
+    }
+
+    private startRun(job: Job & { kind: 'run' }): void {
+        this.running++;
+        job.run(job.signal).then(job.resolve as (value: unknown) => void, job.reject).finally(() => {
+            this.detach(job);
+            this.running--;
+            this.pump();
+        });
+    }
+
+    private spawn(): void {
+        const worker: Worker = { serve: new RayomdServe(this.options), ready: false, busy: false, idleSince: 0 };
+        this.workers.push(worker);
+        worker.serve.ready().then(() => {
+            worker.ready = true;
+            this.idle(worker);
+            this.pump();
+        }, (error: Error) => {
+            this.remove(worker);
+            this.startBlockedUntil = performance.now() + START_RETRY_MS;
+            // No other child running or starting: the calls waiting for one fail with the reason.
+            if (this.workers.length === 0) {
+                for (let at = 0; at < this.queue.length;) {
+                    const job = this.queue[at]!;
+                    if (job.kind !== 'serve') {
+                        at++;
+                        continue;
+                    }
+                    this.queue.splice(at, 1);
+                    this.detach(job);
+                    job.reject(error);
+                }
+            }
+            this.pump();
+        });
+    }
+
+    /**
+     * Notes when a child became idle. One timer, armed while children beyond the first exist,
+     * ends those idle for idleMs: a timer a call cost more than the call's own bookkeeping.
+     */
+    private idle(worker: Worker): void {
+        worker.idleSince = performance.now();
+        if (this.reaper || this.workers.length < 2) return;
+        this.reaper = setInterval(() => this.reap(), Math.max(10, this.idleMs / 2));
+        this.reaper.unref();
+    }
+
+    private reap(): void {
+        const now = performance.now();
+        for (const worker of this.workers.slice(1)) {
+            if (worker.ready && !worker.busy && now - worker.idleSince >= this.idleMs) {
+                this.remove(worker);
+                void worker.serve.close();
+            }
+        }
+        if (this.workers.length < 2) {
+            clearInterval(this.reaper);
+            this.reaper = undefined;
+        }
+    }
+
+    private remove(worker: Worker): void {
+        const at = this.workers.indexOf(worker);
+        if (at >= 0) this.workers.splice(at, 1);
+    }
+
+    private failQueued(): void {
+        clearTimeout(this.startTimer);
+        clearInterval(this.reaper);
+        for (const job of this.queue.splice(0)) {
+            this.detach(job);
+            job.reject(new Error('The rayomd client is closed.'));
+        }
     }
 
     /** Stops every child at once. */
     kill(): void {
         this.closed = true;
-        for (const child of this.children) child.serve.kill();
+        this.failQueued();
+        for (const worker of this.workers) worker.serve.kill();
     }
 
-    /** Ends every child's session (RayomdServe.close). */
+    /** Ends every child's session (RayomdServe.close); calls still waiting fail. */
     async close(graceMs = 2000): Promise<void> {
         this.closed = true;
-        await Promise.all(this.children.map(child => child.serve.close(graceMs)));
+        this.failQueued();
+        await Promise.all(this.workers.map(worker => worker.serve.close(graceMs)));
     }
 }

@@ -130,7 +130,7 @@ describe('RayomdPool', () => {
         await assert.rejects(slow(pool, 'closed'), /closed/);
     });
 
-    test('requests for one output path stay in order on one child', async () => {
+    test('requests for one output path run one after the other, in their order', async () => {
         const pool = new RayomdPool({ command: fakeCommand, maxChildren: 4 });
         try {
             const output = path.join(dir, 'same.pdf');
@@ -169,6 +169,116 @@ describe('RayomdPool', () => {
         } finally {
             await pool.close();
         }
+    });
+
+    const waitFor = async (condition, ms = 5000) => {
+        for (let waited = 0; !condition() && waited < ms; waited += 10) await new Promise(resolve => setTimeout(resolve, 10));
+    };
+
+    test('a burst of small calls is cleared by the warm child without new ones', async () => {
+        const pool = new RayomdPool({ command: fakeCommand, maxChildren: 4 });
+        try {
+            await pool.request({ markdown: 'warm', output: path.join(dir, 'burst-warm.pdf') });
+            await Promise.all(Array.from({ length: 6 }, (_, n) => pool.request({ markdown: `${n}`, output: path.join(dir, `burst${n}.pdf`) })));
+            assert.equal(pool.children, 1);
+        } finally {
+            await pool.close();
+        }
+    });
+
+    test('calls go to the child free first, not to one still starting', async () => {
+        process.env.FAKE_RAYOMD_START_MS = '600';
+        const pool = new RayomdPool({ command: fakeCommand, maxChildren: 4 });
+        try {
+            pool.warm();
+            await waitFor(() => pool.greeting !== undefined);
+            // The warm child is busy 200 ms; a second child starts and greets after 600 ms. The
+            // calls waiting meanwhile go to the warm child once it is free.
+            const start = Date.now();
+            const busy = slow(pool, 'busy-warm');
+            await Promise.all(Array.from({ length: 3 }, (_, n) => pool.request({ markdown: `${n}`, output: path.join(dir, `free${n}.pdf`) })));
+            assert.ok(Date.now() - start < 500, `took ${Date.now() - start} ms`);
+            await busy;
+            assert.equal(pool.children, 2);
+        } finally {
+            delete process.env.FAKE_RAYOMD_START_MS;
+            await pool.close();
+        }
+    });
+
+    test('a call does not wait behind a slow build while another child is free', async () => {
+        const pool = new RayomdPool({ command: fakeCommand, maxChildren: 2 });
+        try {
+            await Promise.all([slow(pool, 'two1'), slow(pool, 'two2')]);
+            assert.equal(pool.children, 2);
+            const big = slow(pool, 'big');
+            const start = Date.now();
+            await Promise.all(Array.from({ length: 5 }, (_, n) => pool.request({ markdown: `${n}`, output: path.join(dir, `quick${n}.pdf`) })));
+            assert.ok(Date.now() - start < 150, `took ${Date.now() - start} ms`);
+            await big;
+        } finally {
+            await pool.close();
+        }
+    });
+
+    test('a waiting call is cancelled by its signal and never reaches rayomd', async () => {
+        const pool = new RayomdPool({ command: fakeCommand, maxChildren: 1 });
+        try {
+            const busy = slow(pool, 'busy');
+            const controller = new AbortController();
+            const output = path.join(dir, 'cancelled.pdf');
+            const waiting = pool.request({ markdown: 'x', output }, { signal: controller.signal });
+            controller.abort();
+            await assert.rejects(waiting, /cancelled/);
+            await busy;
+            assert.equal(existsSync(output), false);
+            await assert.rejects(pool.request({ markdown: 'x', output }, { signal: controller.signal }), /cancelled/);
+        } finally {
+            await pool.close();
+        }
+    });
+
+    test('one-shot runs share the slots: at most maxChildren rayomd processes work', async () => {
+        const pool = new RayomdPool({ command: fakeCommand, maxChildren: 1 });
+        try {
+            await pool.request({ markdown: 'warm', output: path.join(dir, 'slot-warm.pdf') });
+            const order = [];
+            const run = pool.run(() => new Promise(resolve => setTimeout(() => {
+                order.push('run');
+                resolve();
+            }, 200)));
+            await pool.request({ markdown: 'after', output: path.join(dir, 'slot.pdf') }).then(() => order.push('request'));
+            await run;
+            assert.deepEqual(order, ['run', 'request']);
+            // A running one-shot command gets the call's signal.
+            const controller = new AbortController();
+            const stopped = pool.run(signal => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('stopped')))),
+                { signal: controller.signal });
+            controller.abort();
+            await assert.rejects(stopped, /stopped/);
+        } finally {
+            await pool.close();
+        }
+    });
+
+    test('children beyond the first end when idle', async () => {
+        const pool = new RayomdPool({ command: fakeCommand, maxChildren: 3, idleMs: 150 });
+        try {
+            await Promise.all(['i1', 'i2', 'i3'].map(name => slow(pool, name)));
+            assert.equal(pool.children, 3);
+            await waitFor(() => pool.children === 1, 2000);
+            assert.equal(pool.children, 1);
+            assert.equal((await slow(pool, 'i4')).status, 'ok');
+        } finally {
+            await pool.close();
+        }
+    });
+
+    test('a rayomd that cannot start fails the waiting calls instead of leaving them', async () => {
+        const pool = new RayomdPool({ command: { command: path.join(dir, 'no-such-rayomd') } });
+        await assert.rejects(pool.request({ markdown: 'x', output: path.join(dir, 'n1.pdf') }), /could not be started/);
+        await assert.rejects(pool.request({ markdown: 'x', output: path.join(dir, 'n2.pdf') }), /could not be started/);
+        await pool.close();
     });
 });
 

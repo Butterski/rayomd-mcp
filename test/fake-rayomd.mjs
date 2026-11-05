@@ -4,7 +4,8 @@
 // Markdown, so tests can see what the server asked for. Markdown containing CRASH makes the serve
 // child exit mid-request, HANG makes it never answer, GARBAGE makes it answer with a non-JSON line,
 // SLOW makes it take 200 ms, blocking as a conversion does.
-// FAKE_RAYOMD_OLD=1 behaves as a rayomd without --serve --json (no greeting, waits for paths).
+// FAKE_RAYOMD_OLD=1 behaves as a rayomd without --serve --json (no greeting, waits for paths);
+// FAKE_RAYOMD_START_MS=N greets only after N ms, as a cold start would.
 
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -57,6 +58,7 @@ if (process.env.FAKE_RAYOMD_OLD === '1') {
     // An old rayomd reads "--json" as its output folder and waits for input paths.
     createInterface({ input: process.stdin }).on('line', () => {});
 } else {
+    if (process.env.FAKE_RAYOMD_START_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.FAKE_RAYOMD_START_MS));
     process.stdout.write(`${JSON.stringify({ rayomd: '0.0.0-fake', protocol: 1 })}\n`);
     const serveArgs = argv.slice(2);
     createInterface({ input: process.stdin }).on('line', line => {

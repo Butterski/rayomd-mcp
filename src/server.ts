@@ -302,7 +302,7 @@ export class RayomdMcp {
                 outputSchema: recordSchema,
                 annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
             },
-            async args => {
+            async (args, ctx) => {
                 const { markdown, path: input, output, source_path: sourcePath, ...options } = args as z.infer<typeof inputSchema> & ExportOptions;
                 if ((markdown === undefined) === (input === undefined)) return failure('Give exactly one of markdown and path.');
                 if (input !== undefined && sourcePath !== undefined) return failure('source_path applies to markdown text only.');
@@ -325,7 +325,7 @@ export class RayomdMcp {
                 }
                 let record: ServeRecord;
                 try {
-                    record = await this.serve.request(request);
+                    record = await this.serve.request(request, { signal: ctx.mcpReq.signal });
                 } catch (error) {
                     return failure(`${(error as Error).message} The next request starts rayomd again.`);
                 }
@@ -359,7 +359,7 @@ export class RayomdMcp {
                 outputSchema: bookRecordSchema,
                 annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
             },
-            async args => {
+            async (args, ctx) => {
                 const { inputs, output, ...options } = args as z.infer<typeof inputSchema> & ExportOptions;
                 let argv: string[];
                 let target: string;
@@ -379,7 +379,8 @@ export class RayomdMcp {
                 let result;
                 const started = performance.now();
                 try {
-                    result = await runRayomd(await this.rayomd(), argv, this.config.requestTimeoutMs);
+                    const command = await this.rayomd();
+                    result = await this.serve.run(signal => runRayomd(command, argv, this.config.requestTimeoutMs, signal), { signal: ctx.mcpReq.signal });
                 } catch (error) {
                     return failure((error as Error).message);
                 }
@@ -414,7 +415,7 @@ export class RayomdMcp {
                 outputSchema: recoverSchema,
                 annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
             },
-            async ({ pdf, output }) => {
+            async ({ pdf, output }, ctx) => {
                 let input: string;
                 let target: string | undefined;
                 try {
@@ -426,7 +427,9 @@ export class RayomdMcp {
                 const scratch = target === undefined ? await mkdtemp(path.join(tmpdir(), 'rayomd-mcp-')) : undefined;
                 try {
                     const destination = target ?? path.join(scratch!, 'source.md');
-                    const result = await runRayomd(await this.rayomd(), ['--recover-source', input, destination], this.config.requestTimeoutMs);
+                    const command = await this.rayomd();
+                    const result = await this.serve.run(signal => runRayomd(command, ['--recover-source', input, destination], this.config.requestTimeoutMs, signal),
+                        { signal: ctx.mcpReq.signal });
                     if (result.timedOut) return failure('rayomd --recover-source did not finish in time and was stopped.');
                     if (result.code !== 0) return failure(`rayomd: ${rayomdError(result.stderr, result.code)}`);
                     const text = await readFile(destination, 'utf8');

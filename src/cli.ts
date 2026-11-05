@@ -18,8 +18,8 @@ Usage: rayomd-mcp [--root DIR]... [--allow-url-images] [--allow-unsafe-local-ima
 --root DIR       a folder tools may read and write in (repeatable; default the working folder)
 --allow-*        add the matching tool option (off by default)
 --timeout N      seconds one conversion may take (default 60)
---workers N      rayomd processes converting at once when calls overlap (1-16; default one a
-                 CPU, at most 4; a second starts only when a call finds the first busy)
+--workers N      rayomd processes working at once (1-16; default one a CPU, at most 4; another
+                 starts when calls have waited 5 ms for busy ones, and ends after 30 s idle)
 
 Environment: RAYOMD_PATH (the rayomd binary), RAYOMD_GUI_PATH (the RayoMD GUI binary).
 `;
