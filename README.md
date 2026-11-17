@@ -205,7 +205,7 @@ destructive, idempotent, not open-world.
 | `page_size` | `--page-size=` | `a4` `a3` `a5` `letter` `legal`, `-landscape`, `210x297mm`, `210mmxauto` |
 | `toc`, `toc_depth` | `--toc`, `--toc-depth=N` | |
 | `number_headings` | `--number-headings=N` | 1 to 6 levels |
-| `page_numbers` | `--page-numbers` | |
+| `page_numbers` | `--page-numbers` | "N" ("N / M" up to RayoMD 5.3.0); a `theme` with `footer-center = {page} / {pages}` gives "N / M" |
 | `footnotes` | `--footnotes=end\|page` | |
 | `dialect` | `--dialect=github\|obsidian` | |
 | `pdfa`, `pdfua` | `--pdfa`, `--pdfua` | |
