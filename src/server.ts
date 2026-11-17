@@ -98,7 +98,7 @@ function optionsShape(allow: Allowances, book: boolean) {
         toc: z.boolean().optional().describe(book ? 'One table of contents for the whole book' : 'A table of contents first, or at a [TOC] paragraph'),
         toc_depth: level.optional().describe('Heading levels the table of contents lists (default 3)'),
         number_headings: level.optional().describe('Number the headings of this many levels: 1, 1.1, 1.1.1'),
-        page_numbers: z.boolean().optional().describe('"N / M" at the foot of every page'),
+        page_numbers: z.boolean().optional().describe('The page number at the foot of every page'),
         footnotes: z.enum(['end', 'page']).optional().describe('end (default): after the text; page: at the foot of the page of the first reference'),
         dialect: z.enum(['github', 'obsidian']).optional()
             .describe('github (default), or obsidian: callouts, ==highlights==, %%comments%%, [[wiki links]], ![[embeds]]'),
